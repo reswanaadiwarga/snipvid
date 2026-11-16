@@ -1,0 +1,12 @@
+# build output
+bin/
+
+# local scratch and spike workspace
+tmp/
+
+# recordings and build artefacts
+*.mp4
+*.exe
+*.pdb
+*.log
+dist/

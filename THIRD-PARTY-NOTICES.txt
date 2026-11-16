@@ -1,0 +1,39 @@
+THIRD-PARTY NOTICES
+===================
+
+SnipVid is MIT-licensed (see LICENSE). The release zip also contains one
+third-party executable:
+
+ffmpeg
+------
+File:     ffmpeg.exe
+Version:  9.0.2-essentials_build (www.gyan.dev)
+License:  GNU General Public License, version 3 (GPLv3)
+
+The bundled build was configured with --enable-gpl --enable-version3, so it is
+distributed under GPLv3, not LGPL. SnipVid does not link against ffmpeg: it
+runs ffmpeg.exe as a separate process and passes it an argument list. The
+GPLv3 applies to ffmpeg.exe and its source, not to SnipVid's own source.
+
+ffmpeg copyright (c) 2000-2026 the FFmpeg developers.
+
+Source offer
+------------
+The bundled ffmpeg.exe is an unmodified binary from the Windows build linked
+below. The corresponding source is the upstream FFmpeg 9.0.2 release:
+
+  https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
+
+and the build scripts for this Windows build are at:
+
+  https://www.gyan.dev/ffmpeg/builds/
+
+If you prefer the source from the distributor, the same build page publishes
+the exact source archive matching this binary. Either location satisfies the
+GPLv3 requirement to make the corresponding source available.
+
+License text: https://www.gnu.org/licenses/gpl-3.0.txt
+ffmpeg project: https://ffmpeg.org/
+
+The software is provided "as is", without warranty of any kind. See the GPLv3
+text for the full terms.
