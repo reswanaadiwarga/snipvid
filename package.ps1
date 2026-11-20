@@ -1,6 +1,6 @@
-# package.ps1 - build the portable release zip for SnipVid 1.0.0.
+# package.ps1 - build the portable release zip for SnipVid 1.0.1.
 #
-# What it produces: dist\SnipVid-1.0.0-win64.zip, containing SnipVid.exe,
+# What it produces: dist\SnipVid-1.0.1-win64.zip, containing SnipVid.exe,
 # ffmpeg.exe, install.cmd, uninstall.cmd, README.txt, LICENSE and
 # THIRD-PARTY-NOTICES.txt at the archive root. A user extracts it anywhere and
 # runs SnipVid.exe (or install.cmd for shortcuts and auto-start).
@@ -18,8 +18,8 @@
 #
 # Inputs:  build.ps1 (unless -SkipBuild), bin\SnipVid.exe, README.md, LICENSE,
 #          THIRD-PARTY-NOTICES.txt, install.cmd, uninstall.cmd, and ffmpeg.exe.
-# Outputs: dist\SnipVid-1.0.0-win64\ (staging) and
-#          dist\SnipVid-1.0.0-win64.zip.
+# Outputs: dist\SnipVid-1.0.1-win64\ (staging) and
+#          dist\SnipVid-1.0.1-win64.zip.
 # Exit:    0 when the zip exists; 1 with the failing step named on any failure
 #          (build, missing source file, missing ffmpeg, copy, compression).
 # Side effects: runs build.ps1, replaces the staging folder and the zip. Never
@@ -33,7 +33,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $root    = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$version = '1.0.0'
+$version = '1.0.1'
 $name    = "SnipVid-$version-win64"
 $dist    = Join-Path $root 'dist'
 $stage   = Join-Path $dist $name

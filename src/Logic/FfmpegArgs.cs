@@ -133,6 +133,31 @@ namespace SnipVid.Logic
         public FfmpegRequest(
             string outputPath, int monitorIndex, PxRect region, int fps, int cq,
             string microphoneDevice, string systemAudioPipe)
+            : this(outputPath, monitorIndex, region, fps, cq, microphoneDevice, systemAudioPipe, null)
+        {
+        }
+
+        /// <summary>
+        /// Initialises a request that also names the encoder profile to use.
+        /// </summary>
+        /// <param name="outputPath">Destination file; the ffmpeg child's last argument.</param>
+        /// <param name="monitorIndex">Monitor index in the DDA enumeration, for output_idx.</param>
+        /// <param name="region">Monitor-relative physical pixels from Geometry.ToPhysical.</param>
+        /// <param name="fps">Requested frame rate; 60 or 30 is honoured.</param>
+        /// <param name="cq">Constant-quality value, 1-51; mapped per encoder.</param>
+        /// <param name="microphoneDevice">Microphone name for dshow; null or empty means none.</param>
+        /// <param name="systemAudioPipe">Loopback pipe path; null or empty means none.</param>
+        /// <param name="encoder">
+        /// Encoder profile chosen for this machine; null means
+        /// <see cref="EncoderProfile.NvencDirect"/>, the validated default.
+        /// </param>
+        /// <remarks>
+        /// Side effects: none. Every shorter overload passes null here, so a caller
+        /// that never heard of encoder selection gets the argv it always got.
+        /// </remarks>
+        public FfmpegRequest(
+            string outputPath, int monitorIndex, PxRect region, int fps, int cq,
+            string microphoneDevice, string systemAudioPipe, EncoderProfile encoder)
         {
             OutputPath = outputPath;
             MonitorIndex = monitorIndex;
@@ -141,7 +166,18 @@ namespace SnipVid.Logic
             Cq = cq;
             MicrophoneDevice = microphoneDevice;
             SystemAudioPipe = systemAudioPipe;
+            Encoder = encoder;
         }
+
+        /// <summary>
+        /// Encoder profile for this capture; null means the NVENC zero-copy default.
+        /// </summary>
+        /// <remarks>
+        /// Chosen once per machine by the app's encoder selector and then carried
+        /// unchanged into every segment, because segments are joined with -c copy
+        /// and must therefore share one codec configuration.
+        /// </remarks>
+        public EncoderProfile Encoder { get; private set; }
 
         /// <summary>
         /// Destination file, absolute. Not validated here: the caller resolves and
@@ -345,6 +381,7 @@ namespace SnipVid.Logic
             // validated 60 (D1 as amended). For a 30 fps source this is the whole
             // point - at 60 the same picture would be stored twice.
             int fps = IsSupportedFps(request.Fps) ? request.Fps : RecordingFps;
+            EncoderProfile profile = request.Encoder ?? EncoderProfile.NvencDirect;
             string input = string.Concat(
                 "ddagrab=output_idx=", Invariant(request.MonitorIndex),
                 ":framerate=", Invariant(fps),
@@ -352,6 +389,16 @@ namespace SnipVid.Logic
                 ":offset_y=", Invariant(request.Region.Y),
                 ":video_size=", Invariant(request.Region.W), "x", Invariant(request.Region.H),
                 ":draw_mouse=1");
+
+            // The one place the frame path differs between profiles. The GPU-resident
+            // path adds nothing (the validated command line); every other profile
+            // copies the frames to system memory first, which is what lets an
+            // encoder on one adapter read a screen driven by another. No crop and no
+            // scale are added: the region is already ddagrab's own offset/size.
+            if (profile.DownloadFrames)
+            {
+                input += EncoderProfile.DownloadFilter;
+            }
 
             // Audio is a block, not a mode: with no device every element below is
             // skipped and the list is the validated video-only command line, which
@@ -412,14 +459,9 @@ namespace SnipVid.Logic
                 args.Add("audio=" + microphone);
             }
 
-            args.Add("-c:v");
-            args.Add("h264_nvenc");
-            args.Add("-preset");
-            args.Add("p5");
-            args.Add("-tune");
-            args.Add("hq");
-            args.Add("-cq");
-            args.Add(Invariant(request.Cq));
+            // Codec and quality, from the profile. For the default profile this is
+            // exactly the validated -c:v h264_nvenc -preset p5 -tune hq -cq N.
+            args.AddRange(profile.VideoArgs(request.Cq));
 
             // A keyframe - and therefore a fragment boundary - every 60 frames.
             // Without it the fragmentation flags below have nothing to break the
@@ -500,6 +542,68 @@ namespace SnipVid.Logic
             // Last and only once: ffmpeg reads the final unnamed argument as
             // the destination.
             args.Add(request.OutputPath);
+            return args.ToArray();
+        }
+
+        /// <summary>
+        /// Builds a short throwaway capture that tests one encoder profile, or the
+        /// capture alone.
+        /// </summary>
+        /// <param name="profile">
+        /// Profile to test; null tests ddagrab by itself (frames downloaded to
+        /// system memory and thrown away, no encoder involved).
+        /// </param>
+        /// <param name="monitorIndex">Monitor index for output_idx, as in a real capture.</param>
+        /// <param name="cq">Quality value, passed to the profile's encoder arguments.</param>
+        /// <returns>
+        /// Arguments for a 256x256, 30 fps, 20-frame capture written to the null
+        /// muxer. Same -progress channel as a real capture, so the caller reads
+        /// frame= lines exactly as the recorder does.
+        /// </returns>
+        /// <remarks>
+        /// Side effects: none. The capture-only form exists to separate two failures
+        /// that look identical in a real recording (frames=0): ddagrab itself not
+        /// working on this output, and ddagrab working but the encoder unable to read
+        /// its frames. A small fixed size keeps every probe fast and keeps odd
+        /// monitor geometry out of the question; offsets are left at 0, which every
+        /// output can satisfy. Audio is never part of a probe.
+        /// </remarks>
+        public static string[] BuildProbeArguments(EncoderProfile profile, int monitorIndex, int cq)
+        {
+            string input = string.Concat(
+                "ddagrab=output_idx=", Invariant(monitorIndex),
+                ":framerate=30:video_size=256x256");
+
+            // The capture-only probe has no encoder, so it always downloads: that is
+            // the cheapest way to prove frames really arrive in this process.
+            if (profile == null || profile.DownloadFrames)
+            {
+                input += EncoderProfile.DownloadFilter;
+            }
+
+            List<string> args = new List<string>
+            {
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-progress", "pipe:1",
+                "-stats_period", StatsPeriod,
+                "-f", "lavfi",
+                "-i", input,
+                "-frames:v", "20",
+            };
+
+            if (profile != null)
+            {
+                args.AddRange(profile.VideoArgs(cq));
+            }
+
+            args.Add("-fps_mode");
+            args.Add("cfr");
+            args.Add("-f");
+            args.Add("null");
+            args.Add("-");
             return args.ToArray();
         }
 

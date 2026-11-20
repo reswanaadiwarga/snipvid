@@ -4,7 +4,7 @@ SnipVid is inspired by the Windows Snipping Tool. That recorder runs at roughly
 30 fps, sometimes less because the frame rate is variable, and there is no
 setting to change it. SnipVid keeps the same gesture: one hotkey, drag a box,
 record. It records at a fixed 30 or 60 fps, with quality presets. Capture and
-encoding run through ffmpeg and NVIDIA's hardware encoder.
+encoding run through ffmpeg on the GPU or CPU, whichever the machine can do.
 
 ## Download
 
@@ -16,7 +16,8 @@ SnipVid with Windows.
 ## Requirements
 
 - Windows 10 version 2004 (build 19041) or newer.
-- An NVIDIA GPU. `h264_nvenc` is the only encoder.
+- An encoder SnipVid can use: NVIDIA (NVENC), AMD (AMF), Intel Quick Sync, or
+  software x264. It probes for one on the first recording and remembers the answer.
 - .NET Framework 4.8, included in Windows 10 2004 and newer.
 
 ## Usage
@@ -34,7 +35,9 @@ Recordings are saved to `Videos\Screen Recordings` unless you change the folder.
 
 ## Limitations
 
-- NVIDIA GPUs only; there is no software or AMD/Intel encoder path.
+- Hardware encoding depends on the machine. If no hardware encoder can read the
+  captured frames, SnipVid falls back to software x264, which uses noticeably more
+  CPU and may not hold 60 fps at large regions.
 - Recording is limited to one monitor at a time.
 - The executable is unsigned, so Windows SmartScreen warns on the first run.
   Choose "More info" then "Run anyway".

@@ -57,6 +57,58 @@ namespace SnipVid
         private const string MutexName = "SnipVid.SingleInstance";
 
         /// <summary>
+        /// Probes the encoder on a background thread so the first recording does not
+        /// pay for it.
+        /// </summary>
+        /// <param name="config">Startup config, for the encoder choice and the cq value.</param>
+        /// <param name="monitors">Enumerated displays; the first one is warmed.</param>
+        /// <remarks>
+        /// Side effects: may start several short ffmpeg children and write the encoder
+        /// cache. Every failure is swallowed on purpose: <see cref="CaptureController.Begin"/>
+        /// performs the same selection and reports the real message, so a warm-up that
+        /// cannot run must never be the reason a recording is refused. Only the first
+        /// display is warmed; a capture on another monitor probes once, on its own.
+        /// </remarks>
+        private static void WarmEncoderCache(Config config, List<MonitorInfo> monitors)
+        {
+            try
+            {
+                string ffmpeg;
+                string resolveMessage;
+                if (!FfmpegResolver.TryResolve(
+                        config.FfmpegPath, AppDomain.CurrentDomain.BaseDirectory,
+                        Environment.GetEnvironmentVariable("PATH") ?? string.Empty,
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        File.Exists, out ffmpeg, out resolveMessage))
+                {
+                    return;
+                }
+
+                int monitorIndex = monitors != null && monitors.Count > 0 ? monitors[0].Index : 0;
+                int cq = config.Quality;
+                string configured = config.Encoder;
+
+                System.Threading.Tasks.Task.Run(delegate
+                {
+                    try
+                    {
+                        bool fromCache;
+                        string failure;
+                        EncoderSelector.Select(ffmpeg, monitorIndex, cq, configured, null, out fromCache, out failure);
+                    }
+                    catch (Exception)
+                    {
+                        // Begin will try again and report anything real.
+                    }
+                });
+            }
+            catch (Exception)
+            {
+                // Same rule: the warm-up is an optimisation, never a prerequisite.
+            }
+        }
+
+        /// <summary>
         /// Monotonic clock for invocation timestamps. Started by the first statement
         /// of <see cref="Main"/> and assigned nowhere else.
         /// </summary>
@@ -317,6 +369,14 @@ namespace SnipVid
                     // in the order ddagrab's output_idx is assumed to share.
                     _monitors = Monitors.Enumerate(tray.ShowNote);
                     Monitors.Log(_monitors);
+
+                    // Warm the encoder cache on a background thread. Selecting an
+                    // encoder runs a handful of real 20-frame captures, which takes
+                    // one to three seconds; doing it inside Begin froze the overlay
+                    // for that long and a user who stopped quickly got "nothing was
+                    // recorded". Doing it here moves the cost to startup, where a
+                    // pause is expected, and leaves Begin reading the cache.
+                    WarmEncoderCache(config, _monitors);
 
                     // The capture-device list is startup evidence: it is what lets
                     // a user see which microphone ffmpeg will be offered. The
@@ -1428,6 +1488,23 @@ namespace SnipVid
         /// </remarks>
         private string _ffmpeg;
 
+        /// <summary>The encoder profile chosen for this capture, fixed at Begin.</summary>
+        /// <remarks>
+        /// Chosen once per capture and reused for every segment: the join is -c copy,
+        /// so a resume must not switch encoders. Null only while idle.
+        /// </remarks>
+        private EncoderProfile _encoder;
+
+        /// <summary>True when <see cref="_encoder"/> came from the probe cache, not a fresh probe.</summary>
+        /// <remarks>
+        /// Only a cached answer can be stale (new GPU, new driver), so only it earns
+        /// the one automatic re-probe in <see cref="TryRetryWithFreshEncoder"/>.
+        /// </remarks>
+        private bool _encoderFromCache;
+
+        /// <summary>True once the automatic re-probe has been used for this capture.</summary>
+        private bool _encoderRetried;
+
         /// <summary>The accepted region, reused unchanged for every segment (D4).</summary>
         private PxRect _region;
 
@@ -1591,6 +1668,23 @@ namespace SnipVid
                 "record: ffmpeg=" + ffmpeg
                 + " (ffmpeg_path=" + (_config.FfmpegPath.Length == 0 ? "(auto)" : _config.FfmpegPath) + ")");
 
+            // Pick the encoder before anything is created, so a machine on which
+            // nothing works leaves no folder, no scratch directory and no child
+            // behind. First run on a machine probes (a few seconds at worst); every
+            // later run reads the cache.
+            EncoderProfile encoder;
+            bool encoderFromCache;
+            string encoderFailure;
+            encoder = EncoderSelector.Select(
+                ffmpeg, monitor.Index, _quality == null ? _config.Quality : _quality(),
+                _config.Encoder, Inform, out encoderFromCache, out encoderFailure);
+            if (encoder == null)
+            {
+                AppLog.Line("record: aborted, " + encoderFailure);
+                Inform(encoderFailure);
+                return;
+            }
+
             string folder = OutputFolderPath();
             try
             {
@@ -1643,6 +1737,9 @@ namespace SnipVid
             }
 
             _ffmpeg = ffmpeg;
+            _encoder = encoder;
+            _encoderFromCache = encoderFromCache;
+            _encoderRetried = false;
             _region = region;
             _monitor = monitor;
             _outputFolder = folder;
@@ -1733,9 +1830,10 @@ namespace SnipVid
             int cq = _quality == null ? _config.Quality : _quality();
             int fps = _fps == null ? _config.Fps : _fps();
             FfmpegRequest request = new FfmpegRequest(
-                segmentPath, _monitor.Index, _region, fps, cq, _micDevice, pipePath);
+                segmentPath, _monitor.Index, _region, fps, cq, _micDevice, pipePath, _encoder);
             string[] arguments = FfmpegArgs.Build(request);
 
+            AppLog.Line("segment: encoder=" + (_encoder == null ? "nvenc" : _encoder.Id));
             AppLog.Line("segment: argv ffmpeg " + FfmpegArgs.ToCommandLine(arguments));
 
             Recorder recorder = new Recorder(_ffmpeg, arguments);
@@ -2254,6 +2352,15 @@ namespace SnipVid
                 return;
             }
 
+            // The watchdog fired with no frame at all: on a cached encoder this is
+            // the hang a stale cache produces (the child stays alive and waits), so
+            // it gets the same single re-probe as an early exit. A genuinely slow
+            // first frame costs one extra spawn, never a failed recording.
+            if (!hasFrame && timedOut && TryRetryWithFreshEncoder(recorder, false))
+            {
+                return;
+            }
+
             _state = CaptureState.Recording;
             if (hasFrame)
             {
@@ -2525,7 +2632,89 @@ namespace SnipVid
             AppLog.Line(
                 "recorder: exited unexpectedly exit=" + exitCode.ToString(CultureInfo.InvariantCulture)
                 + " state=" + _state);
+
+            // A child that died before its first frame, on an encoder that came from
+            // the cache, is the signature of a stale cache (new GPU or driver): try
+            // once more with a fresh probe before reporting a failure.
+            if (_state == CaptureState.Starting && TryRetryWithFreshEncoder(recorder, true))
+            {
+                return;
+            }
             Stop("ffmpeg-exited");
+        }
+
+        /// <summary>
+        /// Re-probes the encoder once when a cached choice produced no frames, and
+        /// restarts the first segment with the result.
+        /// </summary>
+        /// <param name="recorder">The first segment's child, which produced nothing.</param>
+        /// <param name="exited">True when the child already ended on its own.</param>
+        /// <returns>
+        /// True when this method took over the capture (a new segment was spawned, or
+        /// the capture was abandoned); false when the caller should carry on with its
+        /// ordinary handling.
+        /// </returns>
+        /// <remarks>
+        /// Applies only to the first segment of a capture whose encoder came from the
+        /// cache, once per capture. Side effects: stops the child, drops the cache,
+        /// probes again (blocking, a few seconds at worst) and spawns a replacement
+        /// segment. If nothing works any more the capture is abandoned with one note
+        /// and the scratch discarded. If the fresh probe lands on the same encoder
+        /// and the child had already exited, the failure is real and is left to the
+        /// ordinary path.
+        /// </remarks>
+        private bool TryRetryWithFreshEncoder(Recorder recorder, bool exited)
+        {
+            SessionRunner session = _session;
+            if (_encoderRetried || !_encoderFromCache || _encoder == null || session == null
+                || recorder == null || recorder.Frames > 0 || session.Segments.Count != 0)
+            {
+                return false;
+            }
+            _encoderRetried = true;
+
+            string previous = _encoder.Id;
+            AppLog.Line("encoder: cached encoder " + previous + " produced no frames; probing again");
+
+            // The child goes first: two captures of one output at once would make
+            // the probe's verdict about the machine unreliable.
+            StopLoopback("encoder-retry");
+            RecorderStop outcome = recorder.Stop();
+            LogRecorderStop(recorder, outcome);
+
+            EncoderSelector.Invalidate();
+            bool fromCache;
+            string failure;
+            int cq = _quality == null ? _config.Quality : _quality();
+            EncoderProfile fresh = EncoderSelector.Select(
+                _ffmpeg, _monitor.Index, cq, _config.Encoder, Inform, out fromCache, out failure);
+
+            if (fresh == null)
+            {
+                AppLog.Line("record: aborted, " + failure);
+                Inform(failure);
+                recorder.Dispose();
+                DisposeLoopback();
+                _recorder = null;
+                session.DiscardScratch();
+                Finish();
+                return true;
+            }
+
+            if (exited && string.Equals(fresh.Id, previous, StringComparison.Ordinal))
+            {
+                // Same answer as before: the cache was not the problem.
+                return false;
+            }
+
+            AppLog.Line("encoder: switching " + previous + " -> " + fresh.Id);
+            recorder.Dispose();
+            DisposeLoopback();
+            _recorder = null;
+            _encoder = fresh;
+            _encoderFromCache = false;
+            SpawnSegment(true);
+            return true;
         }
 
         /// <summary>
@@ -2555,6 +2744,9 @@ namespace SnipVid
 
             _session = null;
             _ffmpeg = null;
+            _encoder = null;
+            _encoderFromCache = false;
+            _encoderRetried = false;
             _outputFolder = null;
             _segmentPath = null;
             _exitRequested = false;
@@ -2742,7 +2934,7 @@ namespace SnipVid
                 // Cloned on purpose: NotifyIcon disposes the Icon it is handed,
                 // and SystemIcons.Application is a shared process-wide instance.
                 Icon = (Icon)SystemIcons.Application.Clone(),
-                Text = "SnipVid 1.0.0",
+                Text = "SnipVid 1.0.1",
                 ContextMenuStrip = menu,
                 Visible = false,
             };
@@ -3294,6 +3486,7 @@ namespace SnipVid
                 + " folder=" + config.Folder
                 + " ffmpeg_path=" + (config.FfmpegPath.Length == 0 ? "(auto)" : config.FfmpegPath)
                 + " mic=" + config.Microphone
+                + " encoder=" + config.Encoder
                 + " hotkey=" + config.Hotkey
                 + " notes=" + config.Notes.Count.ToString(CultureInfo.InvariantCulture));
             return config;

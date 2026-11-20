@@ -155,6 +155,7 @@ namespace SnipVid.Logic
             string microphone = MicDefault;
             bool systemAudio = false;
             HotkeySpec hotkey = HotkeySpec.Default;
+            string encoder = EncoderProfile.AutoId;
 
             // Null until the first [section] header: a key before it belongs to no
             // section DESIGN.md section 8 defines, so it is reported rather than
@@ -362,11 +363,33 @@ namespace SnipVid.Logic
                     continue;
                 }
 
+                if (IsName(key, "encoder"))
+                {
+                    // "auto" (probe this machine and pick) or one profile id. Both
+                    // are accepted silently; anything else is the section 8 rule
+                    // for a known key: one note plus the default, and the default
+                    // is auto, so a typo can never pin a machine to an encoder it
+                    // does not have.
+                    string chosen;
+                    if (EncoderProfile.TryParseChoice(value, out chosen))
+                    {
+                        encoder = chosen;
+                    }
+                    else
+                    {
+                        encoder = EncoderProfile.AutoId;
+                        notes.Add("encoder=" + value + " rejected: must be one of "
+                            + EncoderProfile.KnownChoices + "; using auto");
+                    }
+                    continue;
+                }
+
                 // Any other key: ignored with no note (DESIGN.md section 8).
             }
 
             return new Config(
-                fps, requestedFps, quality, folder, ffmpegPath, microphone, systemAudio, hotkey, notes);
+                fps, requestedFps, quality, folder, ffmpegPath, microphone, systemAudio, hotkey,
+                encoder, notes);
         }
 
         /// <summary>Stores already-validated settings; use <see cref="Parse"/>.</summary>
@@ -382,7 +405,8 @@ namespace SnipVid.Logic
         /// <remarks>Side effects: allocates the read-only notes view.</remarks>
         private Config(
             int fps, int requestedFps, int quality, string folder, string ffmpegPath,
-            string microphone, bool systemAudio, HotkeySpec hotkey, List<string> notes)
+            string microphone, bool systemAudio, HotkeySpec hotkey, string encoder,
+            List<string> notes)
         {
             Fps = fps;
             RequestedFps = requestedFps;
@@ -392,6 +416,7 @@ namespace SnipVid.Logic
             Microphone = microphone;
             SystemAudio = systemAudio;
             Hotkey = hotkey;
+            Encoder = encoder;
             Notes = notes.AsReadOnly();
         }
 
@@ -452,6 +477,19 @@ namespace SnipVid.Logic
         /// this feature uses loopback rather than Stereo Mix.
         /// </remarks>
         public bool SystemAudio { get; private set; }
+
+        /// <summary>
+        /// Which video encoder to use: <see cref="EncoderProfile.AutoId"/> (the
+        /// default) or the id of one profile.
+        /// </summary>
+        /// <remarks>
+        /// Auto probes this machine on first use and caches the answer; a named
+        /// profile is trusted as written, with no probe and no fallback, so a
+        /// person can pin an encoder when detection guesses wrong. Not written by
+        /// the settings panel and not part of the shipped sample file: it is an
+        /// escape hatch, and absent keys mean auto.
+        /// </remarks>
+        public string Encoder { get; private set; }
 
         /// <summary>True when the file (or the overlay) turned microphone audio off.</summary>
         /// <remarks>
